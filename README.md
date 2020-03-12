@@ -1,1 +1,3 @@
-# non-profits
+# Non-profits
+
+Geospatial distribution
