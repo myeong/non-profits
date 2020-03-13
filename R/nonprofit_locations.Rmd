@@ -1,0 +1,138 @@
+---
+title: "Voronoi diagram for non-profits"
+author: "Myeong Lee"
+date: "3/12/2020"
+output: html_document
+---
+
+```{r}
+library(ggmap)
+library(ggplot2)
+library(stringr)
+library(readr)
+library(dplyr)
+library(sp)
+library(rgeos)
+library(rgdal)
+library(raster)
+library(classInt)
+library(data.table)
+library(deldir)
+
+register_google(key="AIzaSyAbWGcBtMde4dZs-kZr3-3qlIYu8-4xATM")
+```
+
+
+# Generating Voronoi diagram over the Car2Go data
+```{r}
+setwd("~/git/non-profits/data/")
+
+# Loading the data
+total <- read_delim("eo_dc.csv", delim = ",",col_names = T )
+total$address <- paste(total$STREET, total$CITY, total$STATE, total$ZIP, sep = ", ")
+
+# Currently, we just sample 100 organizations out of the data. Later, they need to be selected precisely.
+centroids <- total[sample(1:nrow(total), 500),]
+centroids$address <- ifelse(str_detect(centroids$address,"PO BOX"), 
+                    paste(centroids$NAME, centroids$CITY, centroids$STATE, centroids$ZIP, sep=", "),
+                    centroids$address)
+
+centroids <- centroids[,c("EIN", "NAME", "address")]
+centroids <- centroids[!duplicated(centroids[c("address")]),]
+coords <- geocode(centroids$address)
+centroids$lon <- coords$lon
+centroids$lat <- coords$lat
+coords <- coords[!duplicated(coords[c("lon","lat")]),]
+
+# Census tract-level 
+tract <- readOGR("../data/Census_Tracts_in_2010/Census_Tracts_in_2010.shp", layer="Census_Tracts_in_2010") %>%
+  spTransform(CRS("+proj=longlat +datum=WGS84"))
+
+
+
+# DC Base Map
+dc_boundary <- readOGR("../data/DC_Boundary/DC_Boundary.shp", layer="DC_Boundary") %>%
+  spTransform(CRS("+proj=longlat +datum=WGS84"))
+
+# The polygon that provides the boundary of the Voronoi diagram.
+cell_diameter <- 0.1
+poly <-  as(extent(dc_boundary) + cell_diameter, "SpatialPolygons")
+
+# function to draw voronoi diagram
+voronoipolygons <- function(x, poly) {
+  if (.hasSlot(x, 'coords')) {
+    crds <- x@coords  
+  } else crds <- x
+  bb = bbox(poly)
+  rw = as.numeric(t(bbox(poly)))
+  z <- deldir(crds[,1], crds[,2])
+  w <- tile.list(z)
+  polys <- vector(mode='list', length=length(w))
+  require(sp)
+  for (i in seq(along=polys)) {
+    pcrds <- cbind(w[[i]]$x, w[[i]]$y)
+    pcrds <- rbind(pcrds, pcrds[1,])
+    polys[[i]] <- Polygons(list(Polygon(pcrds)), ID=as.character(i))
+  }
+  SP <- SpatialPolygons(polys)
+
+  SpatialPolygonsDataFrame(
+    SP, data.frame(x=crds[,1], y=crds[,2], row.names=sapply(slot(SP, 'polygons'), 
+                                    function(x) slot(x, 'ID'))))  
+}
+
+
+v <- voronoipolygons(coords, poly)
+proj4string(v) <- proj4string(dc_boundary)
+
+# If you want to focus only on the DC boundary, need to run the below line.
+v <- raster::intersect(v, dc_boundary)
+v@data$area_v <- area(v)
+v@data$id <- 1:nrow(v@data)
+
+# Create points as SpatialPointsDataFrame
+raw_points <- centroids[,c("lon", "lat")]
+raw_points <- unique(raw_points)
+raw_points <- SpatialPointsDataFrame(coords = raw_points, data = raw_points,
+                               proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+
+
+# Geospatial aggregation
+
+#' Intersect polygons
+intersection = raster::intersect(x = v, y = tract)
+
+#' Calcualte area of each polygon
+intersection@data$int_area = area(intersection)
+
+#' Aggregate data into Voronoi polygon areas
+aggr <- intersection@data %>% dplyr::select(id, area_v, int_area, Shape_Area.1, P0010001) %>%
+  dplyr::group_by(id) 
+aggr$partial_pop <- (aggr$int_area/aggr$Shape_Area.1) * aggr$P0010001
+aggr <- aggr %>% summarise(pop=sum(partial_pop), area_v=first(area_v))
+aggr$pop_density <- aggr$pop / aggr$area_v
+aggr$pop_density <- scale(aggr$pop_density)
+
+#' Join data to census polygons
+v@data = v@data %>% left_join(aggr, by = "id")
+
+# One way to plot the maps (commented out cause it's same to the one using the ggmap)
+# plot(v)
+# points(raw_points, pch=20, col="red", cex=0.1)
+# points(centroids,pch=20, col="blue", cex=0.5)
+
+aggr$id <- as.character(aggr$id)
+
+# Another way to plot the map using GGMap.
+hex_transform <- fortify(v)
+hex_transform <- hex_transform %>% left_join(aggr, by=c("id"))
+map <- get_map(location = 'Washinton DC', zoom = 11, color = "bw")
+mapPoints <- ggmap(map) + 
+  geom_polygon(aes(x=long, y=lat, group=group, fill=pop_density), data = hex_transform, color='red', alpha=0.5) +
+  scale_fill_gradient(low = "yellow", high = "red") +
+  geom_point(data=centroids, aes(x=lon, y=lat), size=0.5, colour="blue") +
+  ggtitle("Voronoi overlay over Non-profit locations.")
+mapPoints
+
+
+```
