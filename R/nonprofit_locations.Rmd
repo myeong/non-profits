@@ -19,7 +19,7 @@ library(classInt)
 library(data.table)
 library(deldir)
 
-register_google(key="AIzaSyAbWGcBtMde4dZs-kZr3-3qlIYu8-4xATM")
+register_google(key="your_Google_Maps_Key_here")
 ```
 
 
